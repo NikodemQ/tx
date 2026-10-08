@@ -17,6 +17,28 @@ pub enum Aspect {
     Ratio(u8, u8),
 }
 
+impl Aspect {
+    pub fn name(self) -> String {
+        match self {
+            Aspect::Free => "free".into(),
+            Aspect::Original => "original".into(),
+            Aspect::Ratio(a, b) => format!("{a}:{b}"),
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Aspect> {
+        match name {
+            "free" => Some(Aspect::Free),
+            "original" => Some(Aspect::Original),
+            _ => {
+                let (a, b) = name.split_once(':')?;
+                let (a, b): (u8, u8) = (a.parse().ok()?, b.parse().ok()?);
+                (a > 0 && b > 0).then_some(Aspect::Ratio(a, b))
+            }
+        }
+    }
+}
+
 pub const ASPECTS: [Aspect; 6] = [
     Aspect::Free,
     Aspect::Original,

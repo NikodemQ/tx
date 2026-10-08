@@ -753,4 +753,13 @@ fn l_on_a_photo_develops_it_and_w_exports_beside_it() {
     s.wait("back in the tree with the export listed", |r| {
         r.iter().any(|l| l.contains("photo_edit.jpg")) && !r.iter().any(|l| l.contains("Basic"))
     });
+    assert!(
+        root.join(".photo.png.xmp").exists(),
+        "the edits are kept beside it"
+    );
+    s.send("l");
+    s.wait("opened again with the edit it had", |r| {
+        r.iter()
+            .any(|l| l.contains("▶Temperature") && l.contains("+1"))
+    });
 }
