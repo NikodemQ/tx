@@ -214,11 +214,12 @@ impl Job {
     pub fn run(self) -> Done {
         match self {
             Job::Load { path } => {
-                let result = load::load(&path).map(|full| {
+                let result = guarded(|| {
+                    let full = load::load(&path)?;
                     let width = full.width;
                     let proxy = load::downscale(full, PROXY_LONGEST);
                     let scale = proxy.width as f32 / width as f32;
-                    (proxy, scale)
+                    Ok((proxy, scale))
                 });
                 Done::Loaded { path, result }
             }
@@ -231,11 +232,14 @@ impl Job {
                 before,
                 framing,
             } => {
-                let (image, histogram) = render(&proxy, &settings, scale, before, framing);
+                let result = guarded(|| {
+                    let (image, histogram) = render(&proxy, &settings, scale, before, framing);
+                    Ok((ImageData(Arc::new(image)), histogram))
+                });
                 Done::Rendered {
                     path,
                     generation,
-                    result: Ok((ImageData(Arc::new(image)), histogram)),
+                    result,
                 }
             }
             Job::Export {
@@ -243,7 +247,8 @@ impl Job {
                 dest,
                 settings,
             } => {
-                let result = load::load(&path).and_then(|full| {
+                let result = guarded(|| {
+                    let full = load::load(&path)?;
                     load::export(&process(full, &settings, 1.0), &dest).map_err(|e| e.to_string())
                 });
                 Done::Exported {
@@ -254,6 +259,12 @@ impl Job {
             }
         }
     }
+}
+
+/// `work`'s result, or an error when it panics, as a raw decoder may on a file it does not expect.
+fn guarded<T>(work: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
+        .unwrap_or_else(|_| Err("the decoder crashed on this file".into()))
 }
 
 /// The picture to show and its histogram. `before` shows the photo unedited; `framing` shows all of

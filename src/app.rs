@@ -60,6 +60,8 @@ enum Mode {
     },
     /// The file under the cursor is open in the built-in editor, which takes every key.
     Edit(Box<Editor>),
+    /// The picture under the cursor is open for developing, which takes every key.
+    Develop(Box<crate::develop::Develop>),
 }
 
 pub struct OverlayView<'a> {
@@ -247,7 +249,9 @@ impl App {
                 }
                 return Response::default();
             }
-            Mode::Prompt(_) | Mode::Conflict { .. } => return Response::default(),
+            Mode::Prompt(_) | Mode::Conflict { .. } | Mode::Develop(_) => {
+                return Response::default();
+            }
             Mode::Normal | Mode::Visual { .. } => {}
         }
         if action == MouseAction::DoubleClick {
@@ -318,6 +322,48 @@ impl App {
         match &self.mode {
             Mode::Edit(editor) => Some(editor),
             _ => None,
+        }
+    }
+
+    pub fn develop(&self) -> Option<&crate::develop::Develop> {
+        match &self.mode {
+            Mode::Develop(develop) => Some(develop),
+            _ => None,
+        }
+    }
+
+    /// Loading, rendering and exporting the photo being developed wants done.
+    pub fn take_develop_jobs(&mut self, now: std::time::Instant) -> Vec<crate::develop::Job> {
+        match &mut self.mode {
+            Mode::Develop(develop) => develop.take_jobs(now),
+            _ => Vec::new(),
+        }
+    }
+
+    /// How long until the developed photo's preview is due, if it is waiting.
+    pub fn develop_wait(&self, now: std::time::Instant) -> Option<std::time::Duration> {
+        self.develop()?.wait(now)
+    }
+
+    /// Takes back a finished develop job. An export can finish after the panel closed, and then
+    /// says so in the footer.
+    pub fn finish_develop(&mut self, done: crate::develop::Done) {
+        if let crate::develop::Done::Exported {
+            dest, result: Ok(()), ..
+        } = &done
+            && let Some(dir) = dest.parent()
+        {
+            self.tree.reload(dir);
+        }
+        match (&mut self.mode, done) {
+            (Mode::Develop(develop), done) => develop.finish(done),
+            (_, crate::develop::Done::Exported { dest, result, .. }) => {
+                self.message = Some(match result {
+                    Ok(()) => format!("exported {}", dest.display()),
+                    Err(e) => format!("not exported: {e}"),
+                });
+            }
+            _ => {}
         }
     }
 
@@ -509,6 +555,16 @@ impl App {
             }
             Mode::Edit(_) => {
                 self.press_edit(key);
+                Response::default()
+            }
+            Mode::Develop(ref mut develop) => {
+                if develop.press(key) {
+                    let dir = develop.path().parent().map(Path::to_path_buf);
+                    self.mode = Mode::Normal;
+                    if let Some(dir) = dir {
+                        self.tree.reload(&dir);
+                    }
+                }
                 Response::default()
             }
             Mode::Normal | Mode::Visual { .. } => self.press_normal(key),
@@ -1001,9 +1057,13 @@ impl App {
         });
     }
 
-    /// Opens a file in the built-in editor. A file it cannot take, such as a binary or a huge one,
-    /// goes to the external opener instead.
+    /// Opens a picture for developing, and another file in the built-in editor. A file the editor
+    /// cannot take, such as a binary or a huge one, goes to the external opener instead.
     fn edit_here(&mut self, path: PathBuf) -> Option<Effect> {
+        if crate::develop::load::can_develop(&path) {
+            self.mode = Mode::Develop(Box::new(crate::develop::Develop::new(path)));
+            return None;
+        }
         let loaded = save::fingerprint(&path).and_then(|key| {
             if key.0 > crate::textbuf::MAX_BYTES as u64 {
                 return Ok(Err(crate::textbuf::LoadError::TooLarge(key.0 as usize)));
@@ -2493,6 +2553,40 @@ mod tests {
 
     fn on_disk(root: &crate::testdir::TestDir) -> String {
         fs::read_to_string(root.path().join("notes.txt")).unwrap()
+    }
+
+    /// Runs the develop jobs due by `now` on this thread, as the runtime would on others.
+    fn run_develop_jobs(app: &mut App, now: std::time::Instant) {
+        for job in app.take_develop_jobs(now) {
+            app.finish_develop(job.run());
+        }
+        app.settle();
+    }
+
+    #[test]
+    fn l_develops_a_picture_exports_it_and_q_returns_to_the_tree() {
+        let root = crate::testdir::tempdir();
+        image::RgbImage::from_pixel(6, 4, image::Rgb([120, 90, 60]))
+            .save(root.path().join("photo.png"))
+            .unwrap();
+        let mut app = open(root.path());
+        keys(&mut app, "l");
+        assert_eq!(
+            app.develop().expect("developing").path(),
+            root.path().join("photo.png")
+        );
+        let later = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        run_develop_jobs(&mut app, later);
+        run_develop_jobs(&mut app, later);
+        assert!(app.develop().unwrap().shown().is_some(), "the preview was rendered");
+        keys(&mut app, "jlw");
+        assert_eq!(app.tree().focused().cursor, 0, "keys went to the panel");
+        run_develop_jobs(&mut app, later);
+        assert!(root.path().join("photo_edit.jpg").exists());
+        keys(&mut app, "q");
+        assert!(app.develop().is_none(), "exported, so one q closes");
+        let names: Vec<_> = app.tree().focused().entries.iter().map(|e| e.name.clone()).collect();
+        assert!(names.iter().any(|n| n == "photo_edit.jpg"), "{names:?}");
     }
 
     #[test]

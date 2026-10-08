@@ -71,7 +71,6 @@ fn is_raw(path: &Path) -> bool {
         .is_some_and(|e| RAW_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
 }
 
-// ponytail: a raw format that makes rawler panic takes tx down with it, catch_unwind if it happens.
 fn load_raw(path: &Path) -> Result<Image, String> {
     let raw = match rawler::decode_file(path) {
         // rawler reads Canon's small raws fourteen times too dark; the camera's own picture is right.
