@@ -58,6 +58,13 @@ pub fn load(path: &Path) -> Result<Image, String> {
     Ok(linear(image, icc.as_deref()))
 }
 
+/// Whether `path` is a picture this can develop: a camera raw, or anything with a picture's signature.
+pub fn can_develop(path: &Path) -> bool {
+    is_raw(path)
+        || infer::get_from_path(path)
+            .is_ok_and(|k| k.is_some_and(|k| k.mime_type().starts_with("image/")))
+}
+
 fn is_raw(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())

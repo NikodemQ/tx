@@ -45,7 +45,7 @@ pub struct Span {
 }
 
 impl Span {
-    fn new(text: impl Into<String>, color: Rgb) -> Span {
+    pub fn new(text: impl Into<String>, color: Rgb) -> Span {
         Span {
             text: text.into(),
             color,

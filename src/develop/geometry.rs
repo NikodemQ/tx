@@ -55,10 +55,8 @@ pub fn straighten(img: Image, angle: f32) -> Image {
         return img;
     }
     let (w, h) = (img.width, img.height);
-    let (s, c) = angle.abs().to_radians().sin_cos();
     let (wf, hf) = (w as f32, h as f32);
-    let f = (wf / (wf * c + hf * s)).min(hf / (wf * s + hf * c));
-    let (cw, ch) = (((wf * f) as usize).max(1), ((hf * f) as usize).max(1));
+    let (cw, ch) = straightened_size(w, h, angle);
     let (x0, y0) = ((w - cw) / 2, (h - ch) / 2);
     let (sin, cos) = angle.to_radians().sin_cos();
     let (cx, cy) = ((wf - 1.0) / 2.0, (hf - 1.0) / 2.0);
@@ -70,6 +68,17 @@ pub fn straighten(img: Image, angle: f32) -> Image {
         }
     });
     Image::new(cw, ch, pixels)
+}
+
+/// The size a `w` by `h` picture has after [`straighten`].
+pub fn straightened_size(w: usize, h: usize, angle: f32) -> (usize, usize) {
+    if angle == 0.0 {
+        return (w, h);
+    }
+    let (s, c) = angle.abs().to_radians().sin_cos();
+    let (wf, hf) = (w as f32, h as f32);
+    let f = (wf / (wf * c + hf * s)).min(hf / (wf * s + hf * c));
+    (((wf * f) as usize).max(1), ((hf * f) as usize).max(1))
 }
 
 /// The colour at a point between pixels, taking the nearest edge pixel outside the picture.
