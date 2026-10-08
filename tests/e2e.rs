@@ -727,3 +727,30 @@ fn over_ssh_a_silent_terminal_is_waited_for_longer_and_keys_still_work() {
         center(r).contains("notes/")
     });
 }
+
+#[test]
+fn l_on_a_photo_develops_it_and_w_exports_beside_it() {
+    let parent = tempfile::tempdir().unwrap();
+    let root = parent.path().join("root");
+    std::fs::create_dir(&root).unwrap();
+    image::RgbImage::from_fn(60, 40, |x, _| image::Rgb([x as u8 * 4, 90, 60]))
+        .save(root.join("photo.png"))
+        .unwrap();
+    let mut s = Session::spawn(&root);
+    s.wait_for_text("photo.png");
+    s.send("l");
+    s.wait_for_text("Basic Curve HSL Detail Crop");
+    s.send("l");
+    let rows = s.wait("temperature moved", |r| {
+        r.iter()
+            .any(|l| l.contains("▶Temperature") && l.contains("+1"))
+    });
+    assert!(rows[0].contains("[+]"), "{rows:#?}");
+    s.send("w");
+    s.wait_for_text("exported");
+    assert!(root.join("photo_edit.jpg").exists());
+    s.send("q");
+    s.wait("back in the tree with the export listed", |r| {
+        r.iter().any(|l| l.contains("photo_edit.jpg")) && !r.iter().any(|l| l.contains("Basic"))
+    });
+}

@@ -285,7 +285,7 @@ pub const COMMANDS: &[CommandInfo] = &[
     info(
         "enter",
         Command::Enter,
-        "open the folder, or edit the file right here",
+        "open the folder, edit the file right here, or develop the photo",
     ),
     info("leave", Command::Leave, "go to the parent directory"),
     info("search", Command::Search, "search names in this column"),

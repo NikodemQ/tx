@@ -540,7 +540,10 @@ impl Develop {
                         if settings == self.settings {
                             self.dirty = false;
                         }
-                        self.message = Some(format!("exported {}", dest.display()));
+                        self.message = Some(format!(
+                            "exported {}",
+                            dest.file_name().unwrap_or_default().to_string_lossy()
+                        ));
                     }
                     Err(e) => self.message = Some(format!("not exported: {e}")),
                 }
@@ -739,7 +742,10 @@ impl Develop {
         // Names are taken here, on the main thread, so exports started together never collide.
         let dest = load::export_path(&self.path, &self.exporting);
         self.exporting.insert(dest.clone());
-        self.message = Some(format!("exporting {}…", dest.display()));
+        self.message = Some(format!(
+            "exporting {}…",
+            dest.file_name().unwrap_or_default().to_string_lossy()
+        ));
         self.jobs.push(Job::Export {
             path: self.path.clone(),
             dest,

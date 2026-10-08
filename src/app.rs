@@ -349,7 +349,9 @@ impl App {
     /// says so in the footer.
     pub fn finish_develop(&mut self, done: crate::develop::Done) {
         if let crate::develop::Done::Exported {
-            dest, result: Ok(()), ..
+            dest,
+            result: Ok(()),
+            ..
         } = &done
             && let Some(dir) = dest.parent()
         {
@@ -359,7 +361,10 @@ impl App {
             (Mode::Develop(develop), done) => develop.finish(done),
             (_, crate::develop::Done::Exported { dest, result, .. }) => {
                 self.message = Some(match result {
-                    Ok(()) => format!("exported {}", dest.display()),
+                    Ok(()) => format!(
+                        "exported {}",
+                        dest.file_name().unwrap_or_default().to_string_lossy()
+                    ),
                     Err(e) => format!("not exported: {e}"),
                 });
             }
@@ -2578,14 +2583,23 @@ mod tests {
         let later = std::time::Instant::now() + std::time::Duration::from_secs(1);
         run_develop_jobs(&mut app, later);
         run_develop_jobs(&mut app, later);
-        assert!(app.develop().unwrap().shown().is_some(), "the preview was rendered");
+        assert!(
+            app.develop().unwrap().shown().is_some(),
+            "the preview was rendered"
+        );
         keys(&mut app, "jlw");
         assert_eq!(app.tree().focused().cursor, 0, "keys went to the panel");
         run_develop_jobs(&mut app, later);
         assert!(root.path().join("photo_edit.jpg").exists());
         keys(&mut app, "q");
         assert!(app.develop().is_none(), "exported, so one q closes");
-        let names: Vec<_> = app.tree().focused().entries.iter().map(|e| e.name.clone()).collect();
+        let names: Vec<_> = app
+            .tree()
+            .focused()
+            .entries
+            .iter()
+            .map(|e| e.name.clone())
+            .collect();
         assert!(names.iter().any(|n| n == "photo_edit.jpg"), "{names:?}");
     }
 
