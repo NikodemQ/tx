@@ -1,6 +1,7 @@
 //! Developing photos: the edits of a raw converter applied to a picture, shown live and exported.
 
 pub mod geometry;
+pub mod load;
 pub mod pipeline;
 
 /// A picture as floating point RGB, row by row.

@@ -501,6 +501,27 @@ fn part_orientation(part: &Embedded, head: &[u8]) -> Orientation {
         .unwrap_or_else(|| jpeg_orientation(head))
 }
 
+/// A JPEG is never bigger than this either way, so asking for it means the full size.
+const FULL_SIZE: (u32, u32) = (u16::MAX as u32, u16::MAX as u32);
+
+/// How a camera raw asks to be turned, the same way its preview is turned.
+pub(crate) fn raw_orientation(path: &Path) -> Orientation {
+    let found = read_head(path).and_then(|head| {
+        let part = crate::rawfile::locate(path, &head, FULL_SIZE)?;
+        Some(part_orientation(&part, &part_head(path, &part, &head)?))
+    });
+    found.unwrap_or(Orientation::NoTransforms)
+}
+
+/// The largest picture a camera stored in its raw file, upright and at full size.
+pub(crate) fn embedded_picture(path: &Path) -> Result<DynamicImage, String> {
+    let head = read_head(path).ok_or("the file could not be read")?;
+    let part =
+        crate::rawfile::locate(path, &head, FULL_SIZE).ok_or("the raw file carries no picture")?;
+    let inner = part_head(path, &part, &head).ok_or("the raw file could not be read")?;
+    decode_jpeg(path, &part, &inner, FULL_SIZE.0, FULL_SIZE.1)
+}
+
 /// What the camera recorded, from the file or else from the JPEG inside it.
 fn facts_of(head: &[u8], part_head: &[u8]) -> Vec<(&'static str, String)> {
     let facts = photo_facts(head);
@@ -612,7 +633,7 @@ fn decode_other(path: &Path, head: &[u8], width: u32, height: u32) -> Result<Dyn
         .map_err(|e| e.to_string())
         .and_then(decode_limited);
     match decoded {
-        Ok((image, orientation)) => {
+        Ok((image, orientation, _)) => {
             let (bw, bh) = stored_box(orientation, width, height);
             let mut image = shrink(image, bw, bh);
             image.apply_orientation(orientation);
@@ -630,19 +651,21 @@ fn decode_other(path: &Path, head: &[u8], width: u32, height: u32) -> Result<Dyn
     }
 }
 
-/// The whole picture and the way it asks to be turned, refusing sizes that would exhaust memory.
-fn decode_limited<R: io::BufRead + io::Seek>(
+/// The whole picture, the way it asks to be turned and its colour profile, refusing sizes that
+/// would exhaust memory.
+pub(crate) fn decode_limited<R: io::BufRead + io::Seek>(
     reader: image::ImageReader<R>,
-) -> Result<(DynamicImage, Orientation), String> {
+) -> Result<(DynamicImage, Orientation, Option<Vec<u8>>), String> {
     let mut decoder = reader.into_decoder().map_err(|e| e.to_string())?;
     let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
+    let icc = decoder.icc_profile().ok().flatten();
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(20_000);
     limits.max_image_height = Some(20_000);
     limits.max_alloc = Some(512 * 1024 * 1024);
     decoder.set_limits(limits).map_err(|e| e.to_string())?;
     let image = DynamicImage::from_decoder(decoder).map_err(|e| e.to_string())?;
-    Ok((image, orientation))
+    Ok((image, orientation, icc))
 }
 
 /// Shrinks a picture to fit `width` by `height`, keeping its shape, with the averaging filter of
