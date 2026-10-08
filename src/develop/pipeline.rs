@@ -6,6 +6,7 @@ use rayon::prelude::*;
 use super::{
     Image,
     geometry::{self, Aspect, FULL, Rect},
+    white::{self, White},
 };
 
 pub const LUMA: [f32; 3] = [0.2126, 0.7152, 0.0722];
@@ -20,8 +21,12 @@ const HSL_CENTERS: [f32; 9] = [0.0, 30.0, 60.0, 120.0, 180.0, 240.0, 270.0, 300.
 /// Every slider. Each has a neutral value at which its step is skipped, so the defaults change nothing.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Settings {
+    /// Kelvin and tint from -150 to 150 for a raw that knows its white, as Lightroom shows them;
+    /// otherwise shifts from -100 to 100.
     pub temp: f32,
     pub tint: f32,
+    /// The white a raw was shot with, which `temp` and `tint` start at.
+    pub as_shot: Option<White>,
     /// Stops, -5 to 5. The other sliders go from -100 to 100 unless noted.
     pub exposure: f32,
     pub contrast: f32,
@@ -55,6 +60,7 @@ impl Default for Settings {
         Settings {
             temp: 0.0,
             tint: 0.0,
+            as_shot: None,
             exposure: 0.0,
             contrast: 0.0,
             highlights: 0.0,
@@ -83,7 +89,7 @@ impl Default for Settings {
 /// width over the full photo's, which sharpening's radius is given in.
 pub fn process(img: Image, s: &Settings, scale: f32) -> Image {
     let mut img = geometry::crop(geometry(img, s), s.crop);
-    white_balance(&mut img, s.temp, s.tint);
+    white_balance(&mut img, s);
     if s.exposure != 0.0 {
         let gain = 2f32.powf(s.exposure);
         map(&mut img, |p| p.map(|c| c * gain));
@@ -137,8 +143,19 @@ fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-/// Gains for red, green and blue that keep the brightness of grey.
-fn white_balance(img: &mut Image, temp: f32, tint: f32) {
+/// For a raw, an adaptation from the white it was shot with to the one chosen. Otherwise gains for
+/// red, green and blue that keep the brightness of grey.
+fn white_balance(img: &mut Image, s: &Settings) {
+    let (temp, tint) = (s.temp, s.tint);
+    if let Some(shot) = s.as_shot {
+        if [temp, tint] != shot {
+            let m = white::rebalance([temp, tint], shot);
+            map(img, |p| {
+                m.map(|row| row[0] * p[0] + row[1] * p[1] + row[2] * p[2])
+            });
+        }
+        return;
+    }
     if temp == 0.0 && tint == 0.0 {
         return;
     }
@@ -500,6 +517,26 @@ mod tests {
         };
         let p = linear(process(grey, &magenta, 1.0).pixels[0]);
         assert!(p[1] < p[0]);
+    }
+
+    #[test]
+    fn a_raw_white_in_kelvin_changes_nothing_as_shot_and_warms_above_it() {
+        let grey = solid(2, 2, [0.2; 3]);
+        let shot = Settings {
+            temp: 5000.0,
+            tint: 5.0,
+            as_shot: Some([5000.0, 5.0]),
+            ..Settings::default()
+        };
+        let same = process(grey.clone(), &shot, 1.0);
+        assert_eq!(same, process(grey.clone(), &Settings::default(), 1.0));
+        let warmer = Settings {
+            temp: 6500.0,
+            ..shot
+        };
+        let p = linear(process(grey, &warmer, 1.0).pixels[0]);
+        assert!(p[0] > p[2], "{p:?}");
+        assert!(near(luma(p), 0.2, 0.01), "grey keeps its brightness: {p:?}");
     }
 
     #[test]

@@ -10,7 +10,11 @@ use image::{DynamicImage, ImageBuffer, ImageReader, Rgb, Rgb32FImage, metadata::
 use rawler::imgop::develop::{Intermediate, ProcessingStep, RawDevelop};
 use rayon::prelude::*;
 
-use super::{Image, pipeline::srgb_to_linear};
+use super::{
+    Image,
+    pipeline::srgb_to_linear,
+    white::{self, White},
+};
 
 /// Camera raw formats, by extension. The rest is read by the image library.
 const RAW_EXTENSIONS: [&str; 17] = [
@@ -32,8 +36,14 @@ const RAW_STEPS: [ProcessingStep; 7] = [
 
 const JPEG_QUALITY: u8 = 92;
 
+/// A photo as read, and for a raw the white it was shot with.
+pub struct Photo {
+    pub image: Image,
+    pub as_shot: Option<White>,
+}
+
 /// The photo at `path`, upright, as linear RGB in sRGB primaries. Raw values may go above one.
-pub fn load(path: &Path) -> Result<Image, String> {
+pub fn load(path: &Path) -> Result<Photo, String> {
     std::fs::metadata(path).map_err(|e| e.to_string())?;
     if is_raw(path) {
         return load_raw(path);
@@ -55,7 +65,10 @@ pub fn load(path: &Path) -> Result<Image, String> {
         Err(e) => return Err(e),
     };
     image.apply_orientation(orientation);
-    Ok(linear(image, icc.as_deref()))
+    Ok(Photo {
+        image: linear(image, icc.as_deref()),
+        as_shot: None,
+    })
 }
 
 /// Whether `path` is a picture this can develop: a camera raw, or anything with a picture's signature.
@@ -71,12 +84,33 @@ fn is_raw(path: &Path) -> bool {
         .is_some_and(|e| RAW_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
 }
 
-fn load_raw(path: &Path) -> Result<Image, String> {
+fn load_raw(path: &Path) -> Result<Photo, String> {
     let raw = match rawler::decode_file(path) {
         // rawler reads Canon's small raws fourteen times too dark; the camera's own picture is right.
         Ok(raw) if !raw.camera.mode.starts_with("sRaw") => raw,
-        _ => return Ok(linear(crate::preview::embedded_picture(path)?, None)),
+        _ => {
+            return Ok(Photo {
+                image: linear(crate::preview::embedded_picture(path)?, None),
+                as_shot: None,
+            });
+        }
     };
+    // The matrix rawler develops with, so the white found here is the one the picture is balanced to.
+    // ponytail: one matrix, where Lightroom blends a raw's daylight and tungsten matrices by temperature;
+    // under warm light it reads about 4% warmer than here (3486 K against 3614 K). Blend both if that matters.
+    use rawler::imgop::xyz::Illuminant;
+    let as_shot = raw
+        .color_matrix_find_first([
+            Illuminant::D65,
+            Illuminant::A,
+            Illuminant::D50,
+            Illuminant::D55,
+        ])
+        .filter(|(_, matrix)| matrix.len() == 9 && !raw.wb_coeffs[0].is_nan())
+        .and_then(|(_, matrix)| {
+            let [r, g, b, _] = raw.wb_coeffs;
+            white::as_shot([r, g, b], &matrix)
+        });
     let developed = RawDevelop::new_with(&RAW_STEPS)
         .develop_intermediate(&raw)
         .map_err(|e| e.to_string())?;
@@ -90,7 +124,10 @@ fn load_raw(path: &Path) -> Result<Image, String> {
         Intermediate::FourColor(_) => return Err("unsupported colour filter".into()),
     };
     // rawler does not know how every camera stores this; the preview's reading does.
-    Ok(orient(image, crate::preview::raw_orientation(path)))
+    Ok(Photo {
+        image: orient(image, crate::preview::raw_orientation(path)),
+        as_shot,
+    })
 }
 
 fn orient(image: Image, orientation: Orientation) -> Image {
@@ -251,13 +288,13 @@ mod tests {
         image::RgbImage::from_pixel(6, 4, Rgb([128; 3]))
             .save(&path)
             .unwrap();
-        let img = load(&path).unwrap();
+        let img = load(&path).unwrap().image;
         assert_eq!((img.width, img.height), (6, 4));
         assert!(near(img.pixels[0][0], 0.2158, 1e-3));
         image::GrayImage::new(5, 3).save(&path).unwrap();
-        assert_eq!(load(&path).unwrap().pixels.len(), 15);
+        assert_eq!(load(&path).unwrap().image.pixels.len(), 15);
         image::RgbaImage::new(5, 3).save(&path).unwrap();
-        assert_eq!(load(&path).unwrap().pixels.len(), 15);
+        assert_eq!(load(&path).unwrap().image.pixels.len(), 15);
     }
 
     #[test]
@@ -267,7 +304,7 @@ mod tests {
         ImageBuffer::<image::Luma<u16>, _>::from_pixel(4, 4, image::Luma([32768]))
             .save(&path)
             .unwrap();
-        let img = load(&path).unwrap();
+        let img = load(&path).unwrap().image;
         assert!(near(img.pixels[0][1], srgb_to_linear(0.5), 2e-3));
     }
 
@@ -290,7 +327,7 @@ mod tests {
             .write_image(&[0; 30 * 20 * 3], 30, 20, image::ExtendedColorType::Rgb8)
             .unwrap();
         std::fs::write(&path, bytes).unwrap();
-        let img = load(&path).unwrap();
+        let img = load(&path).unwrap().image;
         assert_eq!((img.width, img.height), (20, 30));
     }
 
@@ -327,7 +364,7 @@ mod tests {
             .unwrap();
         std::fs::write(&path, bytes).unwrap();
         let naive = [200.0, 100.0, 50.0].map(|v: f32| srgb_to_linear(v / 255.0));
-        let p = load(&path).unwrap().pixels[0];
+        let p = load(&path).unwrap().image.pixels[0];
         // P3 red is redder than sRGB can show, so in sRGB it has more red and less green.
         assert!(p[0] > naive[0] + 0.01 && p[1] < naive[1], "{p:?} {naive:?}");
     }

@@ -3,6 +3,7 @@
 pub mod geometry;
 pub mod load;
 pub mod pipeline;
+pub mod white;
 
 use std::{
     collections::HashSet,
@@ -129,6 +130,47 @@ const DETAIL: [Slider; 4] = [
     slider("Radius", Field::Radius, 0.5, 3.0, 0.1),
 ];
 
+/// For a raw that knows its white, temperature is in kelvin and tint goes to 150, as in Lightroom.
+const KELVIN: Slider = slider(
+    "Temperature",
+    Field::Temp,
+    white::KELVIN_MIN,
+    white::KELVIN_MAX,
+    1.0,
+);
+const RAW_TINT: Slider = slider(
+    "Tint",
+    Field::Tint,
+    -white::TINT_RANGE,
+    white::TINT_RANGE,
+    1.0,
+);
+/// A step of the temperature, in reciprocal megakelvin: about 50 K at 5000 K, finer when warmer,
+/// coarser when cooler, as the eye sees the difference.
+const MIRED_STEP: f32 = 2.0;
+
+/// `kelvin` moved by `steps` of [`MIRED_STEP`], to the nearest 10 K and at least 10 K.
+fn step_kelvin(kelvin: f32, steps: i32) -> f32 {
+    let moved = 1e6 / (1e6 / kelvin - steps as f32 * MIRED_STEP);
+    let rounded = (moved / 10.0).round() * 10.0;
+    let rounded = if rounded == kelvin {
+        kelvin + 10.0 * steps.signum() as f32
+    } else {
+        rounded
+    };
+    rounded.clamp(white::KELVIN_MIN, white::KELVIN_MAX)
+}
+
+/// Where `v` sits between `min` and `max` from 0 to 1. Kelvin are spaced as reciprocals, so that the
+/// common temperatures are not all squeezed against the left end.
+fn position(slider: &Slider, v: f32, kelvin: bool) -> f32 {
+    if kelvin && slider.field == Field::Temp {
+        (1.0 / slider.min - 1.0 / v) / (1.0 / slider.min - 1.0 / slider.max)
+    } else {
+        (v - slider.min) / (slider.max - slider.min)
+    }
+}
+
 fn sliders(panel: usize) -> &'static [Slider] {
     match panel {
         0 => &BASIC,
@@ -192,7 +234,8 @@ pub enum Job {
 pub enum Done {
     Loaded {
         path: PathBuf,
-        result: Result<(Image, f32), String>,
+        /// The preview, its width over the photo's and the white a raw was shot with.
+        result: Result<(Image, f32, Option<white::White>), String>,
     },
     Rendered {
         path: PathBuf,
@@ -215,11 +258,11 @@ impl Job {
         match self {
             Job::Load { path } => {
                 let result = guarded(|| {
-                    let full = load::load(&path)?;
-                    let width = full.width;
-                    let proxy = load::downscale(full, PROXY_LONGEST);
+                    let photo = load::load(&path)?;
+                    let width = photo.image.width;
+                    let proxy = load::downscale(photo.image, PROXY_LONGEST);
                     let scale = proxy.width as f32 / width as f32;
-                    Ok((proxy, scale))
+                    Ok((proxy, scale, photo.as_shot))
                 });
                 Done::Loaded { path, result }
             }
@@ -248,7 +291,7 @@ impl Job {
                 settings,
             } => {
                 let result = guarded(|| {
-                    let full = load::load(&path)?;
+                    let full = load::load(&path)?.image;
                     load::export(&process(full, &settings, 1.0), &dest).map_err(|e| e.to_string())
                 });
                 Done::Exported {
@@ -375,10 +418,10 @@ fn histogram(img: &Image) -> Vec<Line> {
     lines
 }
 
-/// `value` as a bar from `min` to `max` with a knob on it.
-fn bar(value: f32, min: f32, max: f32) -> String {
+/// A bar with a knob at `position`, from 0 to 1.
+fn bar(position: f32) -> String {
     const WIDTH: usize = 16;
-    let at = (((value - min) / (max - min) * (WIDTH - 1) as f32).round() as usize).min(WIDTH - 1);
+    let at = ((position.clamp(0.0, 1.0) * (WIDTH - 1) as f32).round() as usize).min(WIDTH - 1);
     format!("{}●{}", "━".repeat(at), "─".repeat(WIDTH - 1 - at))
 }
 
@@ -419,6 +462,8 @@ pub struct Develop {
     /// The preview's width over the full photo's, which sharpening's radius is scaled by.
     scale: f32,
     settings: Settings,
+    /// What resetting a slider goes back to: the defaults, with a raw's white as shot.
+    base: Settings,
     undo: Vec<Settings>,
     redo: Vec<Settings>,
     panel: usize,
@@ -447,6 +492,7 @@ impl Develop {
             proxy: None,
             scale: 1.0,
             settings: Settings::default(),
+            base: Settings::default(),
             undo: Vec::new(),
             redo: Vec::new(),
             panel: 0,
@@ -510,7 +556,18 @@ impl Develop {
     pub fn finish(&mut self, done: Done) {
         match done {
             Done::Loaded { path, result } if path == self.path => match result {
-                Ok((proxy, scale)) => {
+                Ok((proxy, scale, as_shot)) => {
+                    if let Some(shot) = as_shot {
+                        // White balance moved while loading was a shift; it becomes kelvin from here.
+                        let history = self.undo.iter_mut().chain(&mut self.redo);
+                        for s in [&mut self.settings, &mut self.base]
+                            .into_iter()
+                            .chain(history)
+                        {
+                            [s.temp, s.tint] = shot;
+                            s.as_shot = Some(shot);
+                        }
+                    }
                     self.proxy = Some(Arc::new(proxy));
                     self.scale = scale;
                     self.changed = Some(Instant::now() - DEBOUNCE);
@@ -590,6 +647,23 @@ impl Develop {
         false
     }
 
+    /// Whether white balance is in kelvin, which it is for a raw that knows its white.
+    fn kelvin(&self) -> bool {
+        self.settings.as_shot.is_some()
+    }
+
+    fn sliders(&self) -> Vec<&'static Slider> {
+        let kelvin = self.kelvin();
+        sliders(self.panel)
+            .iter()
+            .map(|s| match s.field {
+                Field::Temp if kelvin => &KELVIN,
+                Field::Tint if kelvin => &RAW_TINT,
+                _ => s,
+            })
+            .collect()
+    }
+
     fn stale(&mut self) {
         self.changed.get_or_insert_with(Instant::now);
     }
@@ -662,17 +736,21 @@ impl Develop {
             };
             return self.change(Settings { crop, ..s });
         }
-        let sliders = sliders(self.panel);
+        let sliders = self.sliders();
         if dy != 0 {
             let n = sliders.len() as i32;
             self.row = (self.row as i32 + dy.signum()).rem_euclid(n) as usize;
             return;
         }
-        let slider = &sliders[self.row];
+        let slider = sliders[self.row];
         let mut new = s;
         let v = slot(&mut new, slider.field, self.band);
-        let moved = *v + dx as f32 * slider.step;
-        *v = ((moved * 10_000.0).round() / 10_000.0).clamp(slider.min, slider.max) + 0.0;
+        *v = if self.kelvin() && slider.field == Field::Temp {
+            step_kelvin(*v, dx)
+        } else {
+            let moved = *v + dx as f32 * slider.step;
+            ((moved * 10_000.0).round() / 10_000.0).clamp(slider.min, slider.max) + 0.0
+        };
         self.change(new);
     }
 
@@ -688,9 +766,9 @@ impl Develop {
                 ..s
             });
         }
-        let field = sliders(self.panel)[self.row].field;
+        let field = self.sliders()[self.row].field;
         let mut new = s;
-        *slot(&mut new, field, self.band) = value(&Settings::default(), field, self.band);
+        *slot(&mut new, field, self.band) = value(&self.base, field, self.band);
         self.change(new);
     }
 
@@ -782,9 +860,12 @@ impl Develop {
                 Span::new("  [ ]", DIM),
             ]));
         }
-        for (i, slider) in sliders(self.panel).iter().enumerate() {
+        let kelvin = self.kelvin();
+        for (i, slider) in self.sliders().into_iter().enumerate() {
             let v = value(s, slider.field, self.band);
-            let shown = if slider.step < 1.0 {
+            let shown = if kelvin && slider.field == Field::Temp {
+                format!("{v:.0} K")
+            } else if slider.step < 1.0 {
                 format!("{v:+.2}")
             } else {
                 format!("{v:+.0}")
@@ -797,7 +878,7 @@ impl Develop {
             label.bold = selected;
             lines.push(Line(vec![
                 label,
-                Span::new(bar(v, slider.min, slider.max), FG),
+                Span::new(bar(position(slider, v, kelvin)), FG),
                 Span::new(format!(" {shown}"), FG),
             ]));
         }
@@ -857,7 +938,7 @@ mod tests {
         develop.take_jobs(Instant::now());
         develop.finish(Done::Loaded {
             path: PathBuf::from("/photos/a.raf"),
-            result: Ok((Image::new(w, h, vec![[0.2; 3]; w * h]), 0.5)),
+            result: Ok((Image::new(w, h, vec![[0.2; 3]; w * h]), 0.5, None)),
         });
         develop
     }
@@ -870,7 +951,7 @@ mod tests {
         assert!(develop.is_loading());
         develop.finish(Done::Loaded {
             path: PathBuf::from("/photos/a.raf"),
-            result: Ok((Image::new(4, 2, vec![[0.2; 3]; 8]), 0.5)),
+            result: Ok((Image::new(4, 2, vec![[0.2; 3]; 8]), 0.5, None)),
         });
         let jobs = develop.take_jobs(Instant::now());
         assert!(matches!(jobs.as_slice(), [Job::Render { scale, .. }] if *scale == 0.5));
@@ -916,6 +997,41 @@ mod tests {
             develop.settings.temp, 1.0,
             "a new change drops what could be redone"
         );
+    }
+
+    #[test]
+    fn a_raw_white_balance_is_in_kelvin_from_the_white_it_was_shot_with() {
+        let mut develop = Develop::new(PathBuf::from("/photos/a.raf"));
+        develop.take_jobs(Instant::now());
+        develop.finish(Done::Loaded {
+            path: PathBuf::from("/photos/a.raf"),
+            result: Ok((
+                Image::new(4, 2, vec![[0.2; 3]; 8]),
+                0.5,
+                Some([5200.0, 8.0]),
+            )),
+        });
+        let text = |d: &Develop| d.panel_lines().iter().map(Line::text).collect::<Vec<_>>();
+        assert!(
+            text(&develop).iter().any(|l| l.contains("5200 K")),
+            "{:?}",
+            text(&develop)
+        );
+        press(&mut develop, "l");
+        assert_eq!(
+            develop.settings.temp, 5250.0,
+            "two mired is about 50 K at 5200 K"
+        );
+        press(&mut develop, "H");
+        assert!(develop.settings.temp < 5000.0, "{}", develop.settings.temp);
+        press(&mut develop, "0");
+        assert_eq!(develop.settings.temp, 5200.0, "reset goes back to as shot");
+        press(&mut develop, "jl");
+        assert_eq!(develop.settings.tint, 9.0);
+        press(&mut develop, &"L".repeat(20));
+        assert_eq!(develop.settings.tint, white::TINT_RANGE);
+        assert_eq!(step_kelvin(2000.0, -1), 2000.0, "stays in range");
+        assert_eq!(step_kelvin(2000.0, 1), 2010.0, "moves at least 10 K");
     }
 
     #[test]

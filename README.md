@@ -45,7 +45,9 @@ Press `?` for the full list. The main ones:
 
 `<cr>` on a picture (JPEG, PNG, TIFF, HEIC on macOS, or a camera raw: CR2, CR3, NEF, ARW, DNG, RAF, ORF, RW2…)
 opens it beside a histogram and five panels of sliders: Basic (white balance, exposure, contrast, tones,
-vibrance, saturation), Curve, HSL, Detail (clarity, texture, sharpening) and Crop. Edits are previewed live
+vibrance, saturation), Curve, HSL, Detail (clarity, texture, sharpening) and Crop. For a camera raw, temperature is in
+kelvin and tint from -150 to 150, starting from the white balance the camera chose, as in Lightroom; other
+pictures have shifts from -100 to 100. Edits are previewed live
 and exported at full size to `<name>_edit.jpg` beside the photo, never over an existing file. They are not
 kept after closing.
 
