@@ -1,6 +1,6 @@
 # tx
 
-A vim-style tree file explorer for the terminal. Includes a simple file preview and text editor. 
+A vim-style tree file explorer for the terminal. Includes a simple file preview, a text editor and a photo developer.
 
 Runs on Linux and macOS.
 
@@ -29,7 +29,7 @@ Press `?` for the full list. The main ones:
 | `gg` `G` `<c-d>` `<c-u>` | first / last / half page |
 | `J` `K` | scroll the preview |
 | `/` `n` `N`, `f` `F` `;` `,` | search, jump by first letter |
-| `<cr>` | open folder, or edit the file in the built-in editor |
+| `<cr>` | open folder, edit the file in the built-in editor, or develop a photo |
 | `i` | open in your own editor or the desktop app |
 | `d` `y` `x` + motion (`dd`, `yy`) | trash / copy / cut |
 | `v`, `<space>` | visual range, toggle selection |
@@ -40,6 +40,31 @@ Press `?` for the full list. The main ones:
 | `<c-o>` `<tab>` | jump history |
 | `zh` | toggle dotfiles |
 | `:` | command line: `cd`, `mkdir`, `touch`, `chmod 644`, `set hidden`, `marks`, `images`, `q` |
+
+## Developing photos
+
+`<cr>` on a picture (JPEG, PNG, TIFF, HEIC on macOS, or a camera raw: CR2, CR3, NEF, ARW, DNG, RAF, ORF, RW2…)
+opens it beside a histogram and five panels of sliders: Basic (white balance, exposure, contrast, tones,
+vibrance, saturation), Curve, HSL, Detail (clarity, texture, sharpening) and Crop. For a camera raw, temperature is in
+kelvin and tint from -150 to 150, starting from the white balance the camera chose, as in Lightroom; other
+pictures have shifts from -100 to 100. Edits are previewed live
+and exported at full size to `<name>_edit.jpg` beside the photo, never over an existing file. They are not
+kept after closing.
+
+| Keys | Action |
+|------|--------|
+| `<tab>` `<s-tab>` | next / previous panel |
+| `j` `k` | slider (Crop: move the frame) |
+| `h` `l`, `H` `L` | change by a step / ten steps (Crop: `H` `J` `K` `L` resize the frame) |
+| `0` | reset the slider (Crop: the crop) |
+| `u` `<c-r>` | undo / redo |
+| `\` | before / after |
+| `[` `]` | HSL band; Crop: straighten by half a degree |
+| `a` `r` | Crop: aspect ratio, quarter turn |
+| `w` | export |
+| `q` `<esc>` | close; with edits not exported, press twice |
+
+Camera raws are read with [rawler](https://github.com/dnglab/dnglab) (LGPL-2.1).
 
 ## Configuration
 

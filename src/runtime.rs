@@ -59,6 +59,7 @@ enum Msg {
     /// SIGTERM or SIGHUP: leave at once, putting the terminal back.
     Terminate,
     FsChange(Vec<PathBuf>),
+    Develop(crate::develop::Done),
 }
 
 pub fn run(terminal: &mut DefaultTerminal, app: &mut App, config: &Config) -> io::Result<Exit> {
@@ -74,6 +75,8 @@ pub fn run(terminal: &mut DefaultTerminal, app: &mut App, config: &Config) -> io
     thread::spawn(preview::warm);
     let worker = spawn_job_worker(tx.clone(), app.trasher());
     spawn_signal_listener(tx.clone());
+    let developer = spawn_developer(tx.clone());
+    let msgs = tx.clone();
     let mut last_image: Option<crate::imageview::Drawn> = None;
     let mut watcher = DirWatcher::new(tx);
     let mut dirty: HashSet<PathBuf> = HashSet::new();
@@ -93,6 +96,17 @@ pub fn run(terminal: &mut DefaultTerminal, app: &mut App, config: &Config) -> io
         }
         for job in app.take_jobs() {
             let _ = worker.send(job);
+        }
+        for job in app.take_develop_jobs(Instant::now()) {
+            if job.is_render() {
+                let _ = developer.send(job);
+            } else {
+                // Loading and exporting take a second or more each and are rare, so each gets a thread.
+                let msgs = msgs.clone();
+                thread::spawn(move || {
+                    let _ = msgs.send(Msg::Develop(job.run()));
+                });
+            }
         }
         *wanted.lock().unwrap() = app.tree().preview().map(|p| p.path.clone());
         *nearby.lock().unwrap() = app.tree().nearby();
@@ -142,6 +156,7 @@ pub fn run(terminal: &mut DefaultTerminal, app: &mut App, config: &Config) -> io
             flush_at.map(|t| t.saturating_duration_since(Instant::now())),
             app.tree().is_loading().then_some(LOADING_TICK),
             app.editor_needs_highlight().then_some(HIGHLIGHT_IDLE),
+            app.develop_wait(Instant::now()),
         ]
         .into_iter()
         .flatten()
@@ -219,6 +234,7 @@ pub fn run(terminal: &mut DefaultTerminal, app: &mut App, config: &Config) -> io
                 }
                 Msg::JobProgress(id, done, total) => app.job_progress(id, done, total),
                 Msg::JobDone(id, outcome) => app.finish_job(id, outcome),
+                Msg::Develop(done) => app.finish_develop(done),
                 Msg::FsChange(paths) => {
                     for path in paths {
                         for candidate in [Some(path.as_path()), path.parent()].into_iter().flatten()
@@ -445,6 +461,21 @@ fn spawn_encoder(msgs: Sender<Msg>) -> Sender<crate::imageview::EncodeJob> {
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job.run()))
                     .unwrap_or((key, None));
             if msgs.send(Msg::Encoded(key, encoded)).is_err() {
+                return;
+            }
+        }
+    });
+    tx
+}
+
+/// Renders the developed photo's preview. Only the newest request matters, so older ones still
+/// queued are dropped.
+fn spawn_developer(msgs: Sender<Msg>) -> Sender<crate::develop::Job> {
+    let (tx, rx) = mpsc::channel::<crate::develop::Job>();
+    thread::spawn(move || {
+        while let Ok(job) = rx.recv() {
+            let job = rx.try_iter().last().unwrap_or(job);
+            if msgs.send(Msg::Develop(job.run())).is_err() {
                 return;
             }
         }

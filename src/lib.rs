@@ -2,6 +2,7 @@ pub mod actions;
 pub mod app;
 pub mod clipboard;
 pub mod config;
+pub mod develop;
 pub mod editmotion;
 pub mod editor;
 pub mod excmd;
