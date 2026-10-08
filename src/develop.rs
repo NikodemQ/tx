@@ -3,6 +3,7 @@
 pub mod geometry;
 pub mod load;
 pub mod pipeline;
+pub mod sidecar;
 pub mod white;
 
 use std::{
@@ -446,14 +447,6 @@ fn plot_curve(points: [f32; 5]) -> Vec<String> {
         .collect()
 }
 
-fn aspect_name(aspect: Aspect) -> String {
-    match aspect {
-        Aspect::Free => "free".into(),
-        Aspect::Original => "original".into(),
-        Aspect::Ratio(a, b) => format!("{a}:{b}"),
-    }
-}
-
 /// A photo open for developing: the sliders, their history and what the screen shows.
 pub struct Develop {
     path: PathBuf,
@@ -464,6 +457,8 @@ pub struct Develop {
     settings: Settings,
     /// What resetting a slider goes back to: the defaults, with a raw's white as shot.
     base: Settings,
+    /// The edits last written beside the photo.
+    saved: Settings,
     undo: Vec<Settings>,
     redo: Vec<Settings>,
     panel: usize,
@@ -485,13 +480,16 @@ pub struct Develop {
 }
 
 impl Develop {
+    /// Opens `path` with the edits saved beside it, if any.
     pub fn new(path: PathBuf) -> Develop {
+        let settings = sidecar::read(&path).unwrap_or_default();
         Develop {
             jobs: vec![Job::Load { path: path.clone() }],
             path,
             proxy: None,
             scale: 1.0,
-            settings: Settings::default(),
+            settings,
+            saved: settings,
             base: Settings::default(),
             undo: Vec::new(),
             redo: Vec::new(),
@@ -543,8 +541,26 @@ impl Develop {
                 before: self.before,
                 framing: self.panel == CROP,
             });
+            self.persist();
         }
         std::mem::take(&mut self.jobs)
+    }
+
+    /// Writes the edits beside the photo when they changed since last time, as Lightroom does.
+    fn persist(&mut self) -> bool {
+        if self.settings == self.saved {
+            return true;
+        }
+        match sidecar::write(&self.path, &self.settings, &self.base) {
+            Ok(()) => {
+                self.saved = self.settings;
+                true
+            }
+            Err(e) => {
+                self.message = Some(format!("edits not saved: {e}"));
+                false
+            }
+        }
     }
 
     /// How long until the preview is due, if it is waiting.
@@ -557,15 +573,25 @@ impl Develop {
         match done {
             Done::Loaded { path, result } if path == self.path => match result {
                 Ok((proxy, scale, as_shot)) => {
-                    if let Some(shot) = as_shot {
-                        // White balance moved while loading was a shift; it becomes kelvin from here.
-                        let history = self.undo.iter_mut().chain(&mut self.redo);
-                        for s in [&mut self.settings, &mut self.base]
-                            .into_iter()
-                            .chain(history)
-                        {
-                            [s.temp, s.tint] = shot;
-                            s.as_shot = Some(shot);
+                    let history = self.undo.iter_mut().chain(&mut self.redo);
+                    for s in [&mut self.settings, &mut self.base]
+                        .into_iter()
+                        .chain(history)
+                    {
+                        match (as_shot, s.as_shot) {
+                            // Kelvin saved before stay; only the white they are relative to is renewed.
+                            (Some(shot), Some(_)) => s.as_shot = Some(shot),
+                            // Shifts from before loading become kelvin, starting as shot.
+                            (Some(shot), None) => {
+                                [s.temp, s.tint] = shot;
+                                s.as_shot = Some(shot);
+                            }
+                            // Kelvin saved for a photo that no longer gives its white.
+                            (None, Some(_)) => {
+                                [s.temp, s.tint] = [0.0, 0.0];
+                                s.as_shot = None;
+                            }
+                            (None, None) => {}
                         }
                     }
                     self.proxy = Some(Arc::new(proxy));
@@ -831,13 +857,17 @@ impl Develop {
         });
     }
 
+    /// Saves the edits and closes, unless saving fails: then a second q closes without them.
     fn quit(&mut self) -> bool {
-        if self.dirty && !self.quit_armed {
-            self.quit_armed = true;
-            self.message = Some("not exported: q again closes, w exports".into());
-            return false;
+        if self.persist() || self.quit_armed {
+            return true;
         }
-        true
+        self.quit_armed = true;
+        self.message = Some(format!(
+            "{}: q again closes without them",
+            self.message.take().unwrap_or_default()
+        ));
+        false
     }
 
     /// The side panel: tabs, the sliders of the current one and what its keys do.
@@ -892,7 +922,7 @@ impl Develop {
         }
         if self.panel == CROP {
             let rows = [
-                ("Aspect      ", aspect_name(s.aspect), "  a"),
+                ("Aspect      ", s.aspect.name(), "  a"),
                 ("Straighten  ", format!("{:+.1}°", s.straighten), "  [ ]"),
                 (
                     "Rotation    ",
@@ -1066,12 +1096,7 @@ mod tests {
     }
 
     #[test]
-    fn closing_with_edits_asks_twice_and_an_export_clears_that() {
-        let mut develop = loaded(4, 2);
-        assert!(press(&mut develop, "q"), "nothing edited closes at once");
-        press(&mut develop, "l");
-        assert!(!press(&mut develop, "q"));
-        assert!(press(&mut develop, "q"));
+    fn exports_take_the_next_free_name_and_clear_the_edited_mark() {
         let mut develop = loaded(4, 2);
         press(&mut develop, "lw");
         let jobs = develop.take_jobs(Instant::now());
@@ -1085,12 +1110,71 @@ mod tests {
         assert!(
             matches!(second.as_slice(), [Job::Export { dest, .. }] if dest.ends_with("a_edit-2.jpg"))
         );
+        assert!(develop.dirty());
         develop.finish(Done::Exported {
             dest,
             settings,
             result: Ok(()),
         });
         assert!(!develop.dirty());
+    }
+
+    /// A photo in a fresh folder, loaded as a raw shot at 5200 K.
+    fn raw_in(dir: &Path) -> Develop {
+        let path = dir.join("a.raf");
+        let mut develop = Develop::new(path.clone());
+        develop.take_jobs(Instant::now());
+        develop.finish(Done::Loaded {
+            path,
+            result: Ok((
+                Image::new(4, 2, vec![[0.2; 3]; 8]),
+                0.5,
+                Some([5200.0, 8.0]),
+            )),
+        });
+        develop
+    }
+
+    #[test]
+    fn edits_are_saved_beside_the_photo_and_come_back_when_it_opens_again() {
+        let dir = crate::testdir::tempdir();
+        let sidecar = dir.path().join(".a.raf.xmp");
+        let mut develop = raw_in(dir.path());
+        press(&mut develop, "lljL");
+        assert!(!sidecar.exists(), "written once the keys pause");
+        develop.take_jobs(Instant::now() + DEBOUNCE);
+        assert!(sidecar.exists());
+        let edited = develop.settings;
+        assert_eq!(edited.temp, 5310.0);
+        assert!(
+            press(&mut develop, "q"),
+            "closing keeps the edits, so one q is enough"
+        );
+
+        let again = raw_in(dir.path());
+        assert_eq!(
+            again.settings, edited,
+            "kelvin saved stay, not reset to as shot"
+        );
+        assert!(!again.dirty());
+        let mut again = again;
+        press(&mut again, "u");
+        assert_eq!(
+            again.settings, edited,
+            "the history starts at the saved edits"
+        );
+        press(&mut again, "0j0");
+        assert_eq!(again.settings, again.base);
+        assert!(press(&mut again, "q"));
+        assert!(!sidecar.exists(), "nothing left to keep, so the file goes");
+    }
+
+    #[test]
+    fn closing_asks_twice_only_when_the_edits_cannot_be_saved() {
+        let mut develop = loaded(4, 2);
+        press(&mut develop, "l");
+        assert!(!press(&mut develop, "q"), "/photos cannot be written");
+        assert!(develop.message.as_deref().unwrap().contains("q again"));
         assert!(press(&mut develop, "q"));
     }
 

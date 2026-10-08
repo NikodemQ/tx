@@ -48,8 +48,10 @@ opens it beside a histogram and five panels of sliders: Basic (white balance, ex
 vibrance, saturation), Curve, HSL, Detail (clarity, texture, sharpening) and Crop. For a camera raw, temperature is in
 kelvin and tint from -150 to 150, starting from the white balance the camera chose, as in Lightroom; other
 pictures have shifts from -100 to 100. Edits are previewed live
-and exported at full size to `<name>_edit.jpg` beside the photo, never over an existing file. They are not
-kept after closing.
+and exported at full size to `<name>_edit.jpg` beside the photo, never over an existing file. As in
+Lightroom, the edits are saved as you go, in a hidden XMP file beside the photo (`.DSCF0001.RAF.xmp` for
+`DSCF0001.RAF`), and come back when the photo is opened again. Lightroom does not read these: the
+sliders compute different things, so they are kept under tx's own namespace.
 
 | Keys | Action |
 |------|--------|
@@ -62,7 +64,7 @@ kept after closing.
 | `[` `]` | HSL band; Crop: straighten by half a degree |
 | `a` `r` | Crop: aspect ratio, quarter turn |
 | `w` | export |
-| `q` `<esc>` | close; with edits not exported, press twice |
+| `q` `<esc>` | close |
 
 Camera raws are read with [rawler](https://github.com/dnglab/dnglab) (LGPL-2.1).
 
