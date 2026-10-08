@@ -9,10 +9,11 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
     app::{App, ColumnKind, HitMap, OverlayView},
+    develop::Develop,
     imageview::Painter,
     layout::{self, Placed},
     model::{Entry, FilePreview, Kind, Level, Load, PreviewState},
-    preview::{Content, Span},
+    preview::{Content, Line, Span},
     theme::{self, BG, DIM, FG},
 };
 
@@ -46,6 +47,11 @@ pub fn render(app: &App, area: Rect, buf: &mut Buffer) {
         ..area
     };
     let center = tree.height / 2;
+    if let Some(develop) = app.develop() {
+        draw_develop(buf, area, tree, app, develop);
+        theme::adapt(buf, app.depth());
+        return;
+    }
 
     let focus = app.tree().focus();
     let levels = app.tree().levels();
@@ -218,6 +224,120 @@ fn draw_editor_footer(buf: &mut Buffer, area: Rect, editor: &crate::editor::Edit
         .saturating_sub(right.width() as u16 + 1)
         .max(area.x);
     buf.set_string(x, y, &right, Style::new().fg(theme::rgb(DIM)));
+}
+
+/// Cells the develop panel's sliders and histogram take beside the picture.
+const DEVELOP_SIDE: u16 = 40;
+/// Below this many cells for the picture, the panel gets the screen to itself.
+const DEVELOP_PICTURE_MIN: u16 = 20;
+
+/// A photo being developed takes the whole width: the picture, and the sliders beside it.
+fn draw_develop(buf: &mut Buffer, area: Rect, tree: Rect, app: &App, develop: &Develop) {
+    let header = format!(
+        "{}{}",
+        tilde(develop.path()),
+        if develop.dirty() { "  [+]" } else { "" }
+    );
+    let style = Style::new().fg(theme::rgb(FG));
+    buf.set_stringn(
+        area.x + 1,
+        area.y,
+        header,
+        usize::from(area.width.saturating_sub(2)),
+        style,
+    );
+    let has_picture = tree.width >= DEVELOP_SIDE + DEVELOP_PICTURE_MIN + 3;
+    let side_x = if has_picture {
+        tree.right() - DEVELOP_SIDE
+    } else {
+        tree.x + 1
+    };
+    if has_picture {
+        let room = Rect::new(tree.x + 1, tree.y, side_x - tree.x - 3, tree.height);
+        draw_develop_picture(buf, room, app, develop);
+    }
+    let mut lines: Vec<Line> = develop.shown().map(|(_, h)| h.to_vec()).unwrap_or_default();
+    if !lines.is_empty() {
+        lines.push(Line::default());
+    }
+    lines.extend(develop.panel_lines());
+    let width = DEVELOP_SIDE.min(tree.right().saturating_sub(side_x));
+    for (i, line) in lines.iter().enumerate().take(usize::from(tree.height)) {
+        draw_spans(buf, side_x, tree.y + i as u16, width, &line.0);
+    }
+    let y = area.bottom() - 1;
+    let (text, color) = match &develop.message {
+        Some(message) => (message.as_str(), WARN),
+        None => (
+            "h/l change  j/k slider  Tab panel  0 reset  u undo  \\ before/after  w export  q close",
+            DIM,
+        ),
+    };
+    let width = usize::from(area.width.saturating_sub(2));
+    buf.set_stringn(
+        area.x + 1,
+        y,
+        text,
+        width,
+        Style::new().fg(theme::rgb(color)),
+    );
+}
+
+/// The developed picture centred in `room`. Until the first one is rendered, the plain preview of
+/// the same file stands in.
+fn draw_develop_picture(buf: &mut Buffer, room: Rect, app: &App, develop: &Develop) {
+    let plain = app
+        .tree()
+        .preview()
+        .filter(|p| p.path == develop.path())
+        .and_then(|p| match &p.state {
+            PreviewState::Ready(content) => content.image.as_ref(),
+            _ => None,
+        });
+    let Some(image) = develop.shown().map(|(image, _)| image).or(plain) else {
+        let note = if develop.is_loading() {
+            "(developing…)"
+        } else {
+            ""
+        };
+        let x = room.x + room.width.saturating_sub(note.width() as u16) / 2;
+        let style = Style::new().fg(theme::rgb(DIM));
+        buf.set_stringn(
+            x,
+            room.y + room.height / 2,
+            note,
+            usize::from(room.width),
+            style,
+        );
+        return;
+    };
+    let painter = app.painter();
+    let Some(size) = painter.fitted_size(image, room.as_size()) else {
+        return;
+    };
+    let at = Rect::new(
+        room.x + (room.width - size.width) / 2,
+        room.y + (room.height - size.height) / 2,
+        size.width,
+        size.height,
+    );
+    painter.draw(develop.path(), image, at, buf);
+}
+
+/// Coloured text from `x`, cut at `width` cells.
+fn draw_spans(buf: &mut Buffer, x: u16, y: u16, width: u16, spans: &[Span]) {
+    let end = x + width;
+    let mut cx = x;
+    for span in spans {
+        if cx >= end {
+            break;
+        }
+        let mut style = Style::new().fg(theme::rgb(span.color));
+        if span.bold {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+        (cx, _) = buf.set_stringn(cx, y, &span.text, usize::from(end - cx), style);
+    }
 }
 
 fn draw_footer(buf: &mut Buffer, area: Rect, app: &App) {
@@ -1508,6 +1628,44 @@ mod tests {
             }
         });
         img.save(path).unwrap();
+    }
+
+    #[test]
+    fn a_developed_picture_fills_the_left_with_the_sliders_on_the_right() {
+        let tmp = crate::testdir::tempdir();
+        write_png(&tmp.path().join("photo.png"), 200, 100);
+        let mut app = open(tmp.path());
+        keys(&mut app, "l");
+        let later = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        for _ in 0..2 {
+            for job in app.take_develop_jobs(later) {
+                app.finish_develop(job.run());
+            }
+        }
+        keys(&mut app, "l");
+        let (lines, buf) = rows(&app, 100, 30);
+        assert!(
+            lines[0].contains("photo.png") && lines[0].contains("[+]"),
+            "{lines:#?}"
+        );
+        let tabs = row_of(&lines, "Basic Curve HSL Detail Crop");
+        assert!(
+            lines[tabs].find("Basic").unwrap() >= 60,
+            "the panel sits on the right"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("▶Temperature") && l.contains("+1"))
+        );
+        assert!(lines[29].contains("w export"), "{lines:#?}");
+        let painted = (1..55)
+            .filter(|&x| {
+                let bg = buf[(x, 15)].bg;
+                bg != theme::rgb(BG) && bg != ratatui::style::Color::Reset
+            })
+            .count();
+        assert!(painted > 20, "the picture fills the middle row: {lines:#?}");
     }
 
     #[test]
